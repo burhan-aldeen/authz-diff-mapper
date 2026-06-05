@@ -1,0 +1,64 @@
+# Example endpoints file for authz-diff-mapper
+# Format: METHOD /path (METHOD is optional, defaults to GET)
+# Lines starting with # are comments
+
+# User endpoints
+GET /api/v1/users/me
+GET /api/v1/users/{userId}
+GET /api/v1/users/{userId}/profile
+GET /api/v1/users/{userId}/settings
+
+# Organization / tenant endpoints
+GET /api/v1/orgs
+GET /api/v1/orgs/{orgId}
+GET /api/v1/orgs/{orgId}/members
+GET /api/v1/orgs/{orgId}/members/{memberId}
+GET /api/v1/orgs/{orgId}/roles
+GET /api/v1/orgs/{orgId}/billing
+GET /api/v1/orgs/{orgId}/invoices
+GET /api/v1/orgs/{orgId}/invoices/{invoiceId}
+GET /api/v1/orgs/{orgId}/subscription
+GET /api/v1/orgs/{orgId}/audit-logs
+
+# Admin endpoints
+GET /api/v1/admin/users
+GET /api/v1/admin/orgs
+GET /api/v1/admin/settings
+GET /api/v1/admin/audit
+GET /api/v1/admin/roles
+GET /api/v1/admin/permissions
+
+# Account / billing
+GET /api/v1/accounts/{accountId}
+GET /api/v1/accounts/{accountId}/transactions
+GET /api/v1/payments
+GET /api/v1/payments/{paymentId}
+GET /api/v1/refunds/{refundId}
+GET /api/v1/coupons
+GET /api/v1/coupons/{couponId}
+GET /api/v1/wallet
+GET /api/v1/wallet/transactions
+
+# Documents and files
+GET /api/v1/documents
+GET /api/v1/documents/{documentId}
+GET /api/v1/files
+GET /api/v1/files/{fileId}
+
+# API keys and tokens
+GET /api/v1/api-keys
+GET /api/v1/tokens
+GET /api/v1/sessions
+GET /api/v1/sessions/{sessionId}
+
+# Integrations / webhooks
+GET /api/v1/webhooks
+GET /api/v1/webhooks/{webhookId}
+GET /api/v1/integrations
+GET /api/v1/integrations/{integrationId}
+
+# Health / status
+GET /health
+GET /status
+GET /api/v1/health
+GET /api/v1/version

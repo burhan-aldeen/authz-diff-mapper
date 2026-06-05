@@ -1,0 +1,8 @@
+{
+  "X-User-ID": "user_abc123",
+  "X-Org-ID": "org_owned_42",
+  "X-Account-ID": "acc_owned_77",
+  "X-Tenant-ID": "tenant_demo_1",
+  "X-Project-ID": "proj_alpha_9",
+  "X-Organization-Context": "org_abc123_demo"
+}
