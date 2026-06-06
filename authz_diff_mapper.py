@@ -455,6 +455,11 @@ class SmartAuthDetector:
                 scheme["expected_prefix"] = "Bearer"
                 scheme["body_hint"] = "body mentions JWT"
                 scheme["confidence"] = 0.7
+            elif re.search(r"(session.*(timed? out|invalid|expire))", body_lower):
+                scheme["primary_scheme"] = "session_cookie"
+                scheme["expected_header"] = "Cookie"
+                scheme["body_hint"] = "body mentions expired/invalid session"
+                scheme["confidence"] = 0.7
             elif re.search(r"(login|signin|password)", body_lower):
                 scheme["primary_scheme"] = "form_login"
                 scheme["body_hint"] = "body mentions login/signin"
@@ -482,6 +487,13 @@ class SmartAuthDetector:
                         "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.test",
                         "admin", "guest", "invalid"]:
                 probes.append((f"smart_bearer_{val}", {"Authorization": f"Bearer {val}"}))
+        elif s in ("session_cookie", "form_login"):
+            # Session/cookie-based auth: try empty session, common values, and Bearer as fallback
+            for val in ["", "null", "undefined", "guest", "admin", "test", "1"]:
+                probes.append((f"smart_cookie_{val or 'empty'}", {"Cookie": f"session={val}"}))
+            for val in ["", "null", "undefined"]:
+                probes.append((f"smart_cookie2_{val or 'empty'}", {"Cookie": f"token={val}"}))
+            probes.append(("smart_cookie_remove", {"Cookie": ""}))
         elif s == "basic_auth":
             for cred in ["dGVzdDp0ZXN0", "YWRtaW46YWRtaW4=", "dXNlcjpwYXNz", "Z3Vlc3Q6Z3Vlc3Q="]:
                 probes.append((f"smart_basic_{cred[:8]}", {"Authorization": f"Basic {cred}"}))
@@ -681,7 +693,8 @@ class HTTPClient:
                                                 allow_redirects=allow_redirects,
                                                 timeout=self.timeout)
                 elapsed = (time.monotonic() - t0) * 1000
-                body = resp.content[:4096]
+                # Full body for swagger parsing; truncated copy for fingerprinting
+                body = resp.content[:2097152]
                 try:
                     body_text = body.decode("utf-8", errors="replace")
                 except Exception:
@@ -1038,12 +1051,33 @@ class AuthProber:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class DifferentialAnalyzer:
+    SUCCESS_STATUSES = {200, 201, 204}
+    PROTECTED_CLASSIFIERS = {"unauthenticated", "missing_auth", "invalid_token", "forbidden"}
+
     @staticmethod
     def analyze(path: str, method: str, fps: list[ResponseFingerprint]) -> list[DifferentialFinding]:
         findings = []
         if not fps:
             return findings
         base = next((f for f in fps if f.probe_name == "no_auth"), fps[0])
+
+        # Check if the endpoint is completely unprotected (no auth needed)
+        if base.status_code in DifferentialAnalyzer.SUCCESS_STATUSES:
+            auth_words = ["login", "signin", "session", "password", "token", "auth"]
+            body_lower = (base.body_snippet or "").lower()
+            if not any(w in body_lower for w in auth_words):
+                findings.append(DifferentialFinding(
+                    endpoint_path=path, method=method,
+                    baseline_probe=base.probe_name, variant_probe="",
+                    baseline_status=base.status_code, variant_status=base.status_code,
+                    baseline_classifier=base.auth_classifier or "", variant_classifier="",
+                    baseline_length=base.content_length, variant_length=base.content_length,
+                    delta_description="Baseline returns success without auth",
+                    risk_score=8,
+                    notes="Endpoint accessible without authentication",
+                    interesting=True
+                ))
+
         for fp in fps:
             if fp.probe_name == base.probe_name:
                 continue
