@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-authz-diff-mapper v1.0.0 — Advanced 401/403 Authorization Behavior Analysis Tool
-==================================================================================
+authz-diff-mapper v1.1.0 — Smart Authorization Differential Analysis Tool
+===========================================================================
 For authorized bug bounty programs and lab environments ONLY.
 Do NOT use against systems you do not own or have explicit written permission to test.
 
@@ -25,7 +25,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-# ── Rich terminal ──────────────────────────────────────────────────────────────
 try:
     from rich.console import Console
     from rich.table import Table
@@ -36,7 +35,6 @@ except ImportError:
     RICH_AVAILABLE = False
     console = None
 
-# ── HTTP backend with fallback ─────────────────────────────────────────────────
 try:
     import httpx
     HTTP_BACKEND = "httpx"
@@ -48,11 +46,7 @@ except ImportError:
         print("[FATAL] Install httpx or requests: pip install httpx rich", file=sys.stderr)
         sys.exit(1)
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# CONSTANTS
-# ═══════════════════════════════════════════════════════════════════════════════
-
-TOOL_VERSION = "1.0.0"
+TOOL_VERSION = "1.1.0"
 TOOL_UA = f"authz-diff-mapper/{TOOL_VERSION} (authorized-testing-only)"
 
 DEFAULT_RATE = 2.0
@@ -61,17 +55,159 @@ DEFAULT_MAX_ENDPOINTS = 500
 DEFAULT_METHODS = ["GET", "HEAD", "OPTIONS"]
 DANGEROUS_METHODS = ["POST", "PUT", "PATCH", "DELETE"]
 
-SAFE_DISCOVERY_PATHS = [
-    "/swagger.json", "/swagger/v1/swagger.json", "/swagger/v2/swagger.json",
-    "/openapi.json", "/openapi/v1.json", "/openapi/v2.json", "/openapi/v3.json",
-    "/api-docs", "/v2/api-docs", "/v3/api-docs",
-    "/docs", "/api/docs", "/swagger-ui.html", "/swagger-resources",
-    "/api/swagger.json", "/api/openapi.json",
-    "/api/v1/swagger.json", "/api/v2/swagger.json", "/api/v3/swagger.json",
-    "/health", "/status", "/api/health", "/api/status",
-    "/version", "/api/version",
-    "/.well-known/openid-configuration", "/.well-known/oauth-authorization-server",
+BASE_PATHS = [
+    "", "/api", "/api/v1", "/api/v2", "/api/v3", "/api/v4",
+    "/v1", "/v2", "/v3", "/v4",
+    "/swagger", "/swagger-ui", "/api-docs", "/apidocs",
+    "/docs", "/doc", "/redoc",
+    "/rest", "/rest-api", "/gateway", "/public",
+    "/internal", "/service", "/services",
+    "/developer", "/developers",
+    "/graphql", "/graphiql", "/graphql-playground",
 ]
+
+DOC_FILES = [
+    "swagger.json", "swagger.yaml", "swagger.yml",
+    "openapi.json", "openapi.yaml", "openapi.yml",
+    "api-docs.json", "apidocs.json", "api.json",
+    "api-merged.json", "doc.json", "docs.json",
+    "index.json",
+]
+
+DOC_PATHS_FLAT = [
+    "/swagger.json", "/swagger.yaml", "/swagger.yml",
+    "/openapi.json", "/openapi.yaml", "/openapi.yml",
+    "/api-docs", "/api-docs.json",
+    "/apidocs", "/apidocs.json",
+    "/docs", "/doc",
+    "/swagger-resources",
+    "/swagger-resources.json",
+    "/swagger-ui.html",
+    "/application.wadl",
+    "/application.wadl?detail=true",
+]
+
+WADL_PATHS = [
+    "/application.wadl",
+    "/application.wadl?detail=true",
+    "/application.wadl?format=xml",
+    "/application.wadl.xml",
+]
+
+SWAGGER_UI_FILES = [
+    "swagger-ui-bundle.html", "swagger-ui-bundle.js",
+    "swagger-ui-es-bundle-core.html", "swagger-ui-es-bundle-core.js",
+    "swagger-ui-es-bundle.html", "swagger-ui-es-bundle.js",
+    "swagger-ui.html", "swagger-ui-init.html", "swagger-ui-init.js",
+    "swagger-ui.js", "swagger-ui.json",
+    "swagger-ui-layout.html", "swagger-ui-layout.js",
+    "swagger-ui.min.js", "swagger-ui-plugins.html", "swagger-ui-plugins.js",
+    "swagger-ui-standalone-preset.html", "swagger-ui-standalone-preset.js",
+]
+
+SWAGGER_CONFIG_FILES = [
+    "swagger-config", "swagger-config.json", "swagger-config.html",
+]
+
+DOC_DIR_NAMES = [
+    "swagger", "swagger-ui", "swagger-config",
+    "api-docs", "apidocs", "docs", "doc",
+    "openapi", "redoc",
+    "v1", "v2", "v3", "v4",
+]
+
+DOC_RESOURCE_NAMES = [
+    "swagger", "swagger-config", "swagger-resources",
+    "api-docs", "apidocs", "docs", "doc",
+    "openapi", "api", "api-merged",
+    "apispec", "apispec_1",
+]
+
+
+def generate_discovery_paths() -> list[str]:
+    seen: set[str] = set()
+    paths: list[str] = []
+
+    def add(p: str):
+        if p not in seen:
+            seen.add(p)
+            paths.append(p)
+
+    # Flat / well-known paths
+    for p in DOC_PATHS_FLAT:
+        add(p)
+
+    # /BASE/DOC_FILE combinations
+    for base in BASE_PATHS:
+        df = base.rstrip("/")
+        for fname in DOC_FILES:
+            add(f"/{fname}" if not base else f"{df}/{fname}")
+        for ui in SWAGGER_UI_FILES:
+            add(f"{df}/{ui}")
+        for cf in SWAGGER_CONFIG_FILES:
+            add(f"{df}/{cf}")
+
+    # Deeper permutations: /api-docs/v1/swagger.json etc.
+    for doc_dir in ["api-docs", "apidocs", "docs", "doc", "swagger", "swagger-ui"]:
+        for ver in ["v1", "v2", "v3", "v4", "latest", "static"]:
+            b = f"/{doc_dir}/{ver}"
+            for fname in DOC_FILES + SWAGGER_UI_FILES + SWAGGER_CONFIG_FILES:
+                add(f"{b}/{fname}")
+            for sub in DOC_RESOURCE_NAMES:
+                for fname in DOC_FILES + SWAGGER_UI_FILES + SWAGGER_CONFIG_FILES:
+                    add(f"{b}/{sub}/{fname}")
+                    for ver2 in ["v1", "v2", "v3"]:
+                        add(f"{b}/{sub}/{ver2}/{fname}")
+
+    # WADL paths with internal/system variants
+    for w in WADL_PATHS:
+        add(w)
+        prefix = w.lstrip("/")
+        for loc in ["api", "rest", "service", "webresources"]:
+            add(f"/{loc}/{prefix}")
+            for scope in ["internal", "system"]:
+                add(f"/{loc}/{scope}/{prefix}")
+                add(f"/{scope}/{prefix}")
+
+    # GraphQL introspection endpoints
+    gql_paths = ["/graphql", "/graphiql", "/graphql-playground",
+                 "/graphql-console", "/graphql-explorer", "/graphql-browser",
+                 "/graphql-dev", "/graphql-api"]
+    gql_suffixes = [
+        "", "/internal", "/system", "/v1", "/v2", "/v3", "/v4", "/v5",
+        "/schema", "/schema/internal", "/schema/system",
+        "/schema/v1", "/schema/v2",
+    ]
+    for gp in gql_paths:
+        for gs in gql_suffixes:
+            add(f"{gp}{gs}")
+    # GraphQL introspection query
+    add("/graphql?query=query+IntrospectionQuery{__schema{types{name,fields{name}}}}")
+    add("/graphql?query={__schema{types{name}}}")
+
+    # .well-known
+    add("/.well-known/openid-configuration")
+    add("/.well-known/oauth-authorization-server")
+    add("/.well-known/openapi.json")
+    add("/.well-known/openapi.html")
+    add("/.well-known/openapi.yaml")
+
+    # Health / status / version
+    for base in ["", "/api", "/api/v1", "/api/v2", "/v1", "/v2"]:
+        for suffix in ["/health", "/status", "/version", "/ping"]:
+            add(f"{base}{suffix}")
+
+    # Common API discovery hits
+    add("/api")
+    add("/api/")
+    add("/api/v1")
+    add("/v1")
+
+    return paths
+
+
+COMPREHENSIVE_DISCOVERY_PATHS = generate_discovery_paths()
+logging.info("Generated %d discovery paths", len(COMPREHENSIVE_DISCOVERY_PATHS))
 
 HIGH_RISK_KEYWORDS = [
     "admin", "internal", "private", "manage", "management",
@@ -99,7 +235,6 @@ BILLING_KW = {"billing", "invoice", "payment", "refund", "wallet", "coupon", "vo
 ADMIN_KW = {"admin", "role", "permission", "impersonate", "superadmin", "root", "elevate", "promote", "demote"}
 TENANT_KW = {"tenant", "org", "organization", "account"}
 
-# Regex-based auth error patterns (more robust than flat keyword lists)
 AUTH_ERROR_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"missing\s+(authorization|auth|token|api.?key)", re.I), "missing_auth"),
     (re.compile(r"missing\s+bearer", re.I), "missing_auth"),
@@ -122,6 +257,10 @@ AUTH_ERROR_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"(login|sign\s*in)\s+required", re.I), "unauthenticated"),
     (re.compile(r"not\s+authenticated", re.I), "unauthenticated"),
     (re.compile(r"authentication\s+required", re.I), "unauthenticated"),
+    (re.compile(r"api\s*key\s*(required|missing|invalid)", re.I), "api_key_required"),
+    (re.compile(r"x-api-key", re.I), "api_key_required"),
+    (re.compile(r"x-auth-token", re.I), "x_auth_token"),
+    (re.compile(r"x-access-token", re.I), "x_access_token"),
 ]
 
 BASELINE_PROBES: list[tuple[str, dict[str, str]]] = [
@@ -141,11 +280,11 @@ BASELINE_PROBES: list[tuple[str, dict[str, str]]] = [
 ]
 
 PATH_VARIATIONS: list[tuple[str, callable]] = [
-    ("trailing_slash",     lambda p: p.rstrip("/") + "/"),
-    ("double_slash",       lambda p: "/" if p.startswith("/") else "" + p),
+    ("trailing_slash",     lambda p: p.rstrip("/") + "/" if p != "/" else p),
+    ("double_slash",       lambda p: "/" + p.lstrip("/")),
     ("encoded_slash",      lambda p: p.replace("/", "%2F", 1) if p.count("/") > 1 else p),
     ("dot_segment",        lambda p: p.rstrip("/") + "/./"),
-    ("dot_dot_segment",    lambda p: p.rstrip("/") + "/../"),
+    ("dot_dot_segment",    lambda p: p.rstrip("/") + "/../" if p != "/" else p),
     ("json_extension",     lambda p: p.rstrip("/") + ".json"),
 ]
 
@@ -163,9 +302,6 @@ CONTENT_VARIANTS: list[tuple[str, dict[str, str]]] = [
     ("content_text",      {"Content-Type": "text/plain"}),
 ]
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# DATACLASSES
-# ═══════════════════════════════════════════════════════════════════════════════
 
 @dataclass
 class EndpointInfo:
@@ -229,6 +365,231 @@ class ClusterGroup:
     content_type: str
     count: int = 0
     members: list[str] = field(default_factory=list)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SMART AUTH DETECTOR — analyzes 401/403 to infer expected auth scheme
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class SmartAuthDetector:
+    @staticmethod
+    def detect(fp: ResponseFingerprint) -> dict[str, Any]:
+        scheme: dict[str, Any] = {
+            "primary_scheme": "unknown",
+            "header_hint": "",
+            "body_hint": "",
+            "expected_header": "",
+            "expected_prefix": "",
+            "confidence": 0.0,
+        }
+        if fp.status_code not in (401, 403):
+            return scheme
+
+        www_auth = fp.www_authenticate.lower()
+        body_lower = fp.body_snippet.lower() if fp.body_snippet else ""
+
+        # WWW-Authenticate header analysis
+        if "bearer" in www_auth:
+            scheme["primary_scheme"] = "bearer_token"
+            scheme["header_hint"] = "WWW-Authenticate: Bearer"
+            scheme["expected_header"] = "Authorization"
+            scheme["expected_prefix"] = "Bearer"
+            scheme["confidence"] = 0.9
+        elif "basic" in www_auth:
+            scheme["primary_scheme"] = "basic_auth"
+            scheme["header_hint"] = "WWW-Authenticate: Basic"
+            scheme["expected_header"] = "Authorization"
+            scheme["expected_prefix"] = "Basic"
+            scheme["confidence"] = 0.9
+        elif "digest" in www_auth:
+            scheme["primary_scheme"] = "digest_auth"
+            scheme["header_hint"] = "WWW-Authenticate: Digest"
+            scheme["expected_header"] = "Authorization"
+            scheme["expected_prefix"] = "Digest"
+            scheme["confidence"] = 0.8
+        elif "negotiate" in www_auth or "ntlm" in www_auth:
+            scheme["primary_scheme"] = "negotiate_auth"
+            scheme["header_hint"] = www_auth[:50]
+            scheme["confidence"] = 0.7
+        elif www_auth:
+            scheme["primary_scheme"] = f"custom({fp.www_authenticate[:60]})"
+            scheme["header_hint"] = fp.www_authenticate[:80]
+            scheme["confidence"] = 0.5
+
+        # Body content analysis
+        if scheme["confidence"] < 0.5:
+            if re.search(r"bearer\s+token", body_lower):
+                scheme["primary_scheme"] = "bearer_token"
+                scheme["expected_header"] = "Authorization"
+                scheme["expected_prefix"] = "Bearer"
+                scheme["body_hint"] = "body mentions bearer token"
+                scheme["confidence"] = 0.7
+            elif re.search(r"api\s*key", body_lower):
+                scheme["primary_scheme"] = "api_key"
+                scheme["body_hint"] = "body mentions api key"
+                scheme["expected_header"] = "X-Api-Key"
+                scheme["confidence"] = 0.7
+            elif re.search(r"(access|auth)\s*token", body_lower):
+                scheme["primary_scheme"] = "access_token"
+                scheme["expected_header"] = "Authorization"
+                scheme["expected_prefix"] = "Bearer"
+                scheme["body_hint"] = "body mentions access/auth token"
+                scheme["confidence"] = 0.6
+            elif re.search(r"x-api-key", body_lower):
+                scheme["primary_scheme"] = "api_key"
+                scheme["expected_header"] = "X-Api-Key"
+                scheme["body_hint"] = "body references X-Api-Key"
+                scheme["confidence"] = 0.8
+            elif re.search(r"x-auth-token", body_lower):
+                scheme["primary_scheme"] = "x_auth_token"
+                scheme["expected_header"] = "X-Auth-Token"
+                scheme["body_hint"] = "body references X-Auth-Token"
+                scheme["confidence"] = 0.7
+            elif re.search(r"(jwt|json web token)", body_lower):
+                scheme["primary_scheme"] = "jwt"
+                scheme["expected_header"] = "Authorization"
+                scheme["expected_prefix"] = "Bearer"
+                scheme["body_hint"] = "body mentions JWT"
+                scheme["confidence"] = 0.7
+            elif re.search(r"(login|signin|password)", body_lower):
+                scheme["primary_scheme"] = "form_login"
+                scheme["body_hint"] = "body mentions login/signin"
+                scheme["confidence"] = 0.4
+
+        # If still unknown, check status code
+        if scheme["confidence"] < 0.3:
+            if fp.status_code == 401:
+                scheme["primary_scheme"] = "generic_bearer"
+                scheme["expected_header"] = "Authorization"
+                scheme["expected_prefix"] = "Bearer"
+                scheme["confidence"] = 0.3
+
+        return scheme
+
+    @staticmethod
+    def generate_probes(scheme: dict[str, Any]) -> list[tuple[str, dict[str, str]]]:
+        probes: list[tuple[str, dict[str, str]]] = []
+        s = scheme.get("primary_scheme", "unknown")
+        hdr = scheme.get("expected_header", "")
+        prefix = scheme.get("expected_prefix", "")
+
+        if s == "bearer_token":
+            for val in ["test", "null", "undefined", "0", "1", "true", "false",
+                        "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.test",
+                        "admin", "guest", "invalid"]:
+                probes.append((f"smart_bearer_{val}", {"Authorization": f"Bearer {val}"}))
+        elif s == "basic_auth":
+            for cred in ["dGVzdDp0ZXN0", "YWRtaW46YWRtaW4=", "dXNlcjpwYXNz", "Z3Vlc3Q6Z3Vlc3Q="]:
+                probes.append((f"smart_basic_{cred[:8]}", {"Authorization": f"Basic {cred}"}))
+        elif s == "api_key":
+            for val in ["test", "null", "undefined", "admin", "guest", "1", "true"]:
+                probes.append((f"smart_apikey_{val}", {hdr or "X-Api-Key": val}))
+        elif s == "x_auth_token":
+            for val in ["test", "null", "undefined", "admin", "guest", "1"]:
+                probes.append((f"smart_xauthtoken_{val}", {hdr or "X-Auth-Token": val}))
+        elif s == "x_access_token":
+            for val in ["test", "null", "undefined", "admin", "1"]:
+                probes.append((f"smart_xaccesstoken_{val}", {hdr or "X-Access-Token": val}))
+        elif hdr:
+            for val in ["test", "null", "undefined", "admin", "guest", "1"]:
+                probes.append((f"smart_{s}_{val}", {hdr: f"{prefix} {val}".strip() if prefix else val}))
+        else:
+            for val in ["test", "null", "undefined", "admin", "1"]:
+                probes.append((f"smart_bearer_{val}", {"Authorization": f"Bearer {val}"}))
+
+        return probes
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# API DOC DISCOVERER — probes for Swagger/OpenAPI/WADL automatically
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class ApiDocDiscoverer:
+    SWAGGER_INDICATORS = [
+        b'"openapi"', b'"swagger"', b'"paths"', b'"info"', b'"swaggerVersion"',
+        b'"apiVersion"', b'"definitions"', b'"components"',
+    ]
+    WADL_INDICATORS = [b'<application', b'<resources', b'<resource', b'<method']
+    GRAPHQL_INDICATORS = [b'"data"', b'"__schema"', b'"__typename"', b'"queryType"']
+
+    def __init__(self, client: HTTPClient, normalizer: TargetNormalizer,
+                 rate_limiter: RateLimiter):
+        self.client = client
+        self.normalizer = normalizer
+        self.rl = rate_limiter
+        self.discovered_docs: list[dict[str, Any]] = []
+
+    def discover(self, max_paths: int = 2000) -> list[dict[str, Any]]:
+        paths = COMPREHENSIVE_DISCOVERY_PATHS[:max_paths]
+        logging.info("Discovering API docs: probing %d paths", len(paths))
+        found: list[dict[str, Any]] = []
+
+        for p in paths:
+            self.rl.wait()
+            resp = self.client.request("GET", self.normalizer.join(p))
+            status = resp["status_code"]
+            body = resp.get("body", "") or ""
+            ct = (resp.get("headers", {}) or {}).get("content-type", "").lower()
+            raw_body = body.encode("utf-8", errors="replace")
+            headers = resp.get("headers", {}) or {}
+
+            if status not in (200, 401, 403, 206):
+                continue
+
+            doc_type = self._detect_doc_type(raw_body, ct, p)
+            if doc_type:
+                entry = {
+                    "path": p,
+                    "status": status,
+                    "content_type": ct,
+                    "type": doc_type,
+                    "body": body if status == 200 else "",
+                    "headers": headers,
+                }
+                found.append(entry)
+                logging.info("  [%s] %s (status=%d)", doc_type, p, status)
+                if doc_type in ("openapi", "swagger") and status == 200:
+                    self.discovered_docs.append(entry)
+
+        logging.info("Discovery complete: %d docs found", len(found))
+        return found
+
+    def _detect_doc_type(self, raw_body: bytes, content_type: str, path: str) -> str:
+        pl = path.lower()
+        if any(indicator in raw_body for indicator in self.SWAGGER_INDICATORS):
+            if b'"openapi"' in raw_body:
+                return "openapi"
+            return "swagger"
+        if any(indicator in raw_body for indicator in self.WADL_INDICATORS):
+            return "wadl"
+        if any(indicator in raw_body for indicator in self.GRAPHQL_INDICATORS) or \
+           "graphql" in path.lower():
+            return "graphql"
+        if "json" in content_type and pl.endswith(".json"):
+            return "json_doc"
+        if "yaml" in content_type or pl.endswith((".yaml", ".yml")):
+            return "yaml_doc"
+        if "wadl" in content_type or pl.endswith(".wadl"):
+            return "wadl"
+        if "html" in content_type and (
+            "swagger" in pl or "api-doc" in pl or "redoc" in pl or "doc" in pl
+        ):
+            return "html_doc"
+        return ""
+
+    def parse_swagger(self, entry: dict) -> Optional["SwaggerAnalyzer"]:
+        try:
+            body = entry.get("body", "")
+            if not body:
+                return None
+            spec = json.loads(body)
+            sa = SwaggerAnalyzer(spec)
+            logging.info("Parsed swagger: %d paths, %d schemes",
+                         len(spec.get("paths", {})), len(sa.security_schemes))
+            return sa
+        except Exception as e:
+            logging.debug("Swagger parse failed for %s: %s", entry.get("path", ""), e)
+            return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -353,8 +714,10 @@ class SwaggerAnalyzer:
 
     def _detect(self) -> int:
         if "openapi" in self.spec:
-            try: return int(str(self.spec["openapi"]).split(".")[0])
-            except: return 3
+            try:
+                return int(str(self.spec["openapi"]).split(".")[0])
+            except Exception:
+                return 3
         return 2 if "swagger" in self.spec else 3
 
     def _extract_schemes(self) -> list[str]:
@@ -369,34 +732,47 @@ class SwaggerAnalyzer:
         segs.discard("")
         for kw in HIGH_RISK_KEYWORDS:
             if kw in segs or kw in pl:
-                if kw in BILLING_KW: score += 10
-                elif kw in ADMIN_KW: score += 10
-                elif kw in TENANT_KW: score += 8
-                else: score += 8
+                if kw in BILLING_KW:
+                    score += 10
+                elif kw in ADMIN_KW:
+                    score += 10
+                elif kw in TENANT_KW:
+                    score += 8
+                else:
+                    score += 8
                 matched.append(kw)
         for p in re.findall(r"\{([^}]+)\}", path):
             if p.lower().replace("_", "").replace("-", "") in OBJECT_ID_KEYWORDS:
-                score += 8; has_id = True; matched.append(f"param:{p}")
+                score += 8
+                has_id = True
+                matched.append(f"param:{p}")
         for p in params:
             pn = (str(p.get("name", ""))).lower().replace("_", "").replace("-", "")
             if pn in OBJECT_ID_KEYWORDS:
-                score += 8; has_id = True; matched.append(f"qparam:{p.get('name')}")
-        if self.security_schemes: score += 7
+                score += 8
+                has_id = True
+                matched.append(f"qparam:{p.get('name')}")
+        if self.security_schemes:
+            score += 7
         for m in methods:
-            if m.upper() in ("DELETE", "PUT", "PATCH"): score += 3
+            if m.upper() in ("DELETE", "PUT", "PATCH"):
+                score += 3
         for va in VERSION_ALTERNATIVES:
-            if va.rstrip("/") in pl: score += 2
+            if va.rstrip("/") in pl:
+                score += 2
         return score, list(dict.fromkeys(matched)), has_id
 
     def extract(self) -> list[EndpointInfo]:
         endpoints = []
         for path, item in self.spec.get("paths", {}).items():
-            if not isinstance(item, dict): continue
+            if not isinstance(item, dict):
+                continue
             methods, params = [], []
             params.extend(item.get("parameters", []))
             for m in ("get", "post", "put", "patch", "delete", "head", "options"):
                 op = item.get(m)
-                if not op: continue
+                if not op:
+                    continue
                 methods.append(m.upper())
                 params.extend(op.get("parameters", []))
                 for ct, sw in op.get("requestBody", {}).get("content", {}).items():
@@ -404,10 +780,10 @@ class SwaggerAnalyzer:
                         params.append({"name": pn, "in": "body"})
             score, kws, hid = self._score(path, methods, params)
             endpoints.append(EndpointInfo(path=path, methods=methods or ["GET"],
-                             parameters=params[:20], has_object_id=hid,
-                             risk_keywords=kws, risk_score=score, source="swagger",
-                             security_schemes=self.security_schemes,
-                             notes=", ".join(kws[:5])))
+                                          parameters=params[:20], has_object_id=hid,
+                                          risk_keywords=kws, risk_score=score, source="swagger",
+                                          security_schemes=self.security_schemes,
+                                          notes=", ".join(kws[:5])))
         endpoints.sort(key=lambda e: e.risk_score, reverse=True)
         return endpoints
 
@@ -439,20 +815,11 @@ class EndpointCollector:
             for line in f:
                 line = line.strip()
                 if line and not line.startswith("#"):
-                    if not line.startswith("/"): line = "/" + line
+                    if not line.startswith("/"):
+                        line = "/" + line
                     result.append(line)
         logging.info("Loaded %d endpoints from %s", len(result), path)
         return result
-
-    def discover(self, rate_limiter: RateLimiter) -> list[str]:
-        found = []
-        for p in SAFE_DISCOVERY_PATHS:
-            rate_limiter.wait()
-            resp = self.client.request("GET", self.normalizer.join(p))
-            if resp["status_code"] in (200, 401, 403):
-                found.append(p)
-        logging.info("Discovery: %d endpoints found", len(found))
-        return found
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -462,24 +829,32 @@ class EndpointCollector:
 class ResponseClassifier:
     @staticmethod
     def classify(status: int, body: str, headers: dict) -> str:
-        if status == 0: return "connection_error"
+        if status == 0:
+            return "connection_error"
         loc = headers.get("location", "").lower()
         if status in (301, 302, 303, 307, 308):
-            return "redirect_to_login" if any(k in loc for k in ("login","signin","auth","oauth","sso")) else "redirect"
-        if status == 405: return "method_not_allowed"
-        if status == 404: return "not_found"
-        if status == 429: return "rate_limited"
-        if status >= 500: return "server_error"
+            return "redirect_to_login" if any(k in loc for k in ("login", "signin", "auth", "oauth", "sso")) else "redirect"
+        if status == 405:
+            return "method_not_allowed"
+        if status == 404:
+            return "not_found"
+        if status == 429:
+            return "rate_limited"
+        if status >= 500:
+            return "server_error"
         bl = body.lower()
         if 200 <= status < 300:
             for pat, _ in AUTH_ERROR_PATTERNS:
-                if pat.search(bl): return "unauthorized_body_with_200"
+                if pat.search(bl):
+                    return "unauthorized_body_with_200"
             return "possible_success"
         if status in (401, 403):
             for pat, cls_ in AUTH_ERROR_PATTERNS:
-                if pat.search(bl): return cls_
+                if pat.search(bl):
+                    return cls_
             return "unauthenticated" if status == 401 else "forbidden"
-        if status == 206: return "possible_success"
+        if status == 206:
+            return "possible_success"
         return "unknown"
 
 
@@ -508,20 +883,20 @@ class ResponseFingerprinter:
         ct = hdrs.get("content-type", "")
         cl = resp.get("content_length", len(body.encode("utf-8")))
         bh = hashlib.sha256(body[:2048].encode("utf-8", errors="replace")).hexdigest()[:16]
-        title = (m.group(1).strip()[:80] if (m := re.search(r"<title[^>]*>(.*?)</title>", body, re.I|re.S)) else "")
+        title = (m.group(1).strip()[:80] if (m := re.search(r"<title[^>]*>(.*?)</title>", body, re.I | re.S)) else "")
         snippet = scrub_sensitive(body[:200])
         return ResponseFingerprint(url=url, method=method, probe_name=probe_name,
-            status_code=status, content_length=cl, content_type=ct[:80],
-            body_hash=bh, body_snippet=snippet, title=title,
-            location=hdrs.get("location", "")[:200],
-            has_set_cookie="set-cookie" in hdrs,
-            www_authenticate=hdrs.get("www-authenticate", "")[:200],
-            server=hdrs.get("server", "")[:80],
-            allow_header=hdrs.get("allow", "")[:100],
-            cors_origin=hdrs.get("access-control-allow-origin", "")[:100],
-            cors_methods=hdrs.get("access-control-allow-methods", "")[:100],
-            auth_classifier=ResponseClassifier.classify(status, body, hdrs),
-            elapsed_ms=resp.get("elapsed_ms", 0.0), error=resp.get("error", "")[:200])
+                                   status_code=status, content_length=cl, content_type=ct[:80],
+                                   body_hash=bh, body_snippet=snippet, title=title,
+                                   location=hdrs.get("location", "")[:200],
+                                   has_set_cookie="set-cookie" in hdrs,
+                                   www_authenticate=hdrs.get("www-authenticate", "")[:200],
+                                   server=hdrs.get("server", "")[:80],
+                                   allow_header=hdrs.get("allow", "")[:100],
+                                   cors_origin=hdrs.get("access-control-allow-origin", "")[:100],
+                                   cors_methods=hdrs.get("access-control-allow-methods", "")[:100],
+                                   auth_classifier=ResponseClassifier.classify(status, body, hdrs),
+                                   elapsed_ms=resp.get("elapsed_ms", 0.0), error=resp.get("error", "")[:200])
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -532,7 +907,7 @@ class AuthProber:
     def __init__(self, normalizer: TargetNormalizer, client: HTTPClient,
                  rate_limiter: RateLimiter, token: Optional[str] = None,
                  extra_hdrs: Optional[dict] = None, ctx: Optional[dict] = None,
-                 dry_run: bool = False):
+                 dry_run: bool = False, smart_detect: bool = False):
         self.normalizer = normalizer
         self.client = client
         self.rl = rate_limiter
@@ -540,16 +915,17 @@ class AuthProber:
         self.extra_hdrs = extra_hdrs or {}
         self.ctx = ctx or {}
         self.dry_run = dry_run
+        self.smart_detect = smart_detect
         self._extra_probes: list[tuple[str, dict]] = []
         if token:
-            base = {"Authorization": f"Bearer {token}"}
-            base.update(self.extra_hdrs)
-            self._extra_probes.append(("valid_token", dict(base)))
+            base_d = {"Authorization": f"Bearer {token}"}
+            base_d.update(self.extra_hdrs)
+            self._extra_probes.append(("valid_token", dict(base_d)))
             for k in self.extra_hdrs:
-                reduced = {kk: vv for kk, vv in base.items() if kk != k}
+                reduced = {kk: vv for kk, vv in base_d.items() if kk != k}
                 self._extra_probes.append((f"token_no_{k.lower().replace('-','_')}", reduced))
             for ck, cv in self.ctx.items():
-                ch = dict(base)
+                ch = dict(base_d)
                 ch[f"X-{ck.replace('_','-').title()}"] = str(cv)
                 self._extra_probes.append((f"token_ctx_{ck}", ch))
 
@@ -567,6 +943,73 @@ class AuthProber:
             results.append(fp)
         return results
 
+    def probe_smart(self, path: str, method: str = "GET",
+                    first_pass_fps: Optional[list[ResponseFingerprint]] = None) -> list[ResponseFingerprint]:
+        if not self.smart_detect:
+            return self.probe(path, method)
+
+        url = self.normalizer.join(path)
+        results = list(first_pass_fps) if first_pass_fps else []
+
+        if not results:
+            # Do a minimal first probe to detect auth scheme
+            for pname, phdrs in [("no_auth", {}), ("bearer_test", {"Authorization": "Bearer test"})]:
+                self.rl.wait()
+                merged = {**self.extra_hdrs, **phdrs}
+                resp = self.client.request(method, url, headers=merged)
+                fp = ResponseFingerprinter.fingerprint(url, method, pname, resp)
+                results.append(fp)
+            first_pass_fps = results
+
+        # Use the first probe's response to detect auth scheme
+        probe_fp = first_pass_fps[0] if first_pass_fps else results[0] if results else None
+        if not probe_fp or probe_fp.status_code not in (401, 403):
+            if not first_pass_fps:
+                for pname, phdrs in BASELINE_PROBES:
+                    if self.dry_run:
+                        continue
+                    self.rl.wait()
+                    merged = {**self.extra_hdrs, **phdrs}
+                    resp = self.client.request(method, url, headers=merged)
+                    fp = ResponseFingerprinter.fingerprint(url, method, pname, resp)
+                    results.append(fp)
+            return results
+
+        scheme = SmartAuthDetector.detect(probe_fp)
+        logging.debug("Smart auth detected for %s %s: %s (confidence=%.1f)",
+                      method, path, scheme["primary_scheme"], scheme["confidence"])
+
+        smart_probes = SmartAuthDetector.generate_probes(scheme)
+        seen_names = {r.probe_name for r in results}
+        for pname, phdrs in smart_probes:
+            if pname in seen_names:
+                continue
+            seen_names.add(pname)
+            if self.dry_run:
+                logging.info("[DRY-RUN] %s %s [%s]", method, url, pname)
+                continue
+            self.rl.wait()
+            merged = {**self.extra_hdrs, **phdrs}
+            resp = self.client.request(method, url, headers=merged)
+            fp = ResponseFingerprinter.fingerprint(url, method, pname, resp)
+            results.append(fp)
+
+        # Also add standard probes that weren't in first_pass
+        for pname, phdrs in list(BASELINE_PROBES) + self._extra_probes:
+            if pname in seen_names:
+                continue
+            seen_names.add(pname)
+            if self.dry_run:
+                logging.info("[DRY-RUN] %s %s [%s]", method, url, pname)
+                continue
+            self.rl.wait()
+            merged = {**self.extra_hdrs, **phdrs}
+            resp = self.client.request(method, url, headers=merged)
+            fp = ResponseFingerprinter.fingerprint(url, method, pname, resp)
+            results.append(fp)
+
+        return results
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # DIFFERENTIAL ANALYZER
@@ -576,37 +1019,60 @@ class DifferentialAnalyzer:
     @staticmethod
     def analyze(path: str, method: str, fps: list[ResponseFingerprint]) -> list[DifferentialFinding]:
         findings = []
-        if not fps: return findings
+        if not fps:
+            return findings
         base = next((f for f in fps if f.probe_name == "no_auth"), fps[0])
         for fp in fps:
-            if fp.probe_name == base.probe_name: continue
+            if fp.probe_name == base.probe_name:
+                continue
             parts, score, interesting = [], 0, False
             bs, vs = base.status_code, fp.status_code
             bc, vc = base.auth_classifier, fp.auth_classifier
             if bs in (401, 403) and vs in (200, 201, 206, 302):
-                parts.append(f"Status {bs}->{vs} (auth bypass candidate)"); score += 6; interesting = True
+                parts.append(f"Status {bs}->{vs} (auth bypass candidate)")
+                score += 6
+                interesting = True
             if bs != vs:
-                parts.append(f"Status changed {bs}->{vs}"); score += 2
+                parts.append(f"Status changed {bs}->{vs}")
+                score += 2
             if bc == "missing_auth" and vc == "invalid_token":
-                parts.append("missing_auth->invalid_token (token detection)"); score += 3
+                parts.append("missing_auth->invalid_token (token detection)")
+                score += 3
             if bc == "invalid_token" and vc == "insufficient_scope":
-                parts.append("invalid_token->insufficient_scope (scope diff)"); score += 3; interesting = True
-            if bc != vc: parts.append(f"Classifier: {bc}->{vc}")
-            if base.body_hash != fp.body_hash and vs == bs: parts.append("Body hash changed"); score += 5
+                parts.append("invalid_token->insufficient_scope (scope diff)")
+                score += 3
+                interesting = True
+            if bc != vc:
+                parts.append(f"Classifier: {bc}->{vc}")
+            if base.body_hash != fp.body_hash and vs == bs:
+                parts.append("Body hash changed")
+                score += 5
             ld = abs(base.content_length - fp.content_length)
-            if ld > 200 and base.content_length > 0: parts.append(f"Content-Length delta: {ld}B"); score += 5
-            if fp.has_set_cookie and not base.has_set_cookie: parts.append("Set-Cookie appeared"); score += 5; interesting = True
-            if fp.allow_header and not base.allow_header: parts.append(f"Allow: {fp.allow_header}"); score += 4
-            if fp.www_authenticate != base.www_authenticate: parts.append("WWW-Auth changed"); score += 3
-            if fp.cors_origin != base.cors_origin: parts.append(f"CORS: {fp.cors_origin}"); score += 4
-            if not parts: continue
+            if ld > 200 and base.content_length > 0:
+                parts.append(f"Content-Length delta: {ld}B")
+                score += 5
+            if fp.has_set_cookie and not base.has_set_cookie:
+                parts.append("Set-Cookie appeared")
+                score += 5
+                interesting = True
+            if fp.allow_header and not base.allow_header:
+                parts.append(f"Allow: {fp.allow_header}")
+                score += 4
+            if fp.www_authenticate != base.www_authenticate:
+                parts.append("WWW-Auth changed")
+                score += 3
+            if fp.cors_origin != base.cors_origin:
+                parts.append(f"CORS: {fp.cors_origin}")
+                score += 4
+            if not parts:
+                continue
             findings.append(DifferentialFinding(endpoint_path=path, method=method,
-                baseline_probe=base.probe_name, variant_probe=fp.probe_name,
-                baseline_status=bs, variant_status=vs,
-                baseline_classifier=bc, variant_classifier=vc,
-                baseline_length=base.content_length, variant_length=fp.content_length,
-                delta_description=" | ".join(parts), risk_score=score,
-                notes="Manual review recommended", interesting=interesting))
+                                                baseline_probe=base.probe_name, variant_probe=fp.probe_name,
+                                                baseline_status=bs, variant_status=vs,
+                                                baseline_classifier=bc, variant_classifier=vc,
+                                                baseline_length=base.content_length, variant_length=fp.content_length,
+                                                delta_description=" | ".join(parts), risk_score=score,
+                                                notes="Manual review recommended", interesting=interesting))
         return sorted(findings, key=lambda f: f.risk_score, reverse=True)
 
 
@@ -621,11 +1087,14 @@ class PathVariationModule:
         for name, fn in PATH_VARIATIONS:
             try:
                 v = fn(path)
-                if v != path: variants.append((name, v))
-            except: pass
+                if v != path:
+                    variants.append((name, v))
+            except Exception:
+                pass
         for va in VERSION_ALTERNATIVES:
             swapped = re.sub(r"/api/v\d+", va, path)
-            if swapped != path: variants.append((f"version:{va.lstrip('/')}", swapped))
+            if swapped != path:
+                variants.append((f"version:{va.lstrip('/')}", swapped))
         return variants
 
 
@@ -636,6 +1105,7 @@ class PathVariationModule:
 class ResponseClusterer:
     def __init__(self):
         self._clusters: dict[str, ClusterGroup] = {}
+
     def add(self, fp: ResponseFingerprint):
         ct = fp.content_type.split(";")[0].strip()[:30]
         key = f"{fp.status_code}|{fp.auth_classifier}|{ct}"
@@ -644,8 +1114,10 @@ class ResponseClusterer:
                                                classifier=fp.auth_classifier, content_type=ct)
         self._clusters[key].count += 1
         self._clusters[key].members.append(f"{fp.probe_name}|{fp.url}"[:80])
+
     def clusters(self) -> list[ClusterGroup]:
         return sorted(self._clusters.values(), key=lambda c: c.count, reverse=True)
+
     def rare(self, threshold: int = 5) -> list[ClusterGroup]:
         return [c for c in self.clusters() if c.count <= threshold]
 
@@ -658,10 +1130,14 @@ class RiskScorer:
     @staticmethod
     def assess(ep: EndpointInfo, findings: list[DifferentialFinding]) -> tuple[int, str]:
         total = ep.risk_score + sum(f.risk_score for f in findings[:5])
-        if total >= 28: return total, "Critical manual review"
-        if total >= 18: return total, "High manual review"
-        if total >= 10: return total, "Medium interest"
-        if total >= 4:  return total, "Low interest"
+        if total >= 28:
+            return total, "Critical manual review"
+        if total >= 18:
+            return total, "High manual review"
+        if total >= 10:
+            return total, "Medium interest"
+        if total >= 4:
+            return total, "Low interest"
         return total, "Noise"
 
     @staticmethod
@@ -719,7 +1195,7 @@ class ReportGenerator:
         interesting = sum(1 for fv in self.findings.values() for f in fv if f.interesting)
         if RICH_AVAILABLE and console:
             console.print(Panel(f"[bold cyan]authz-diff-mapper[/] v{TOOL_VERSION}\n"
-                          f"Target: [yellow]{self.base_url}[/]\nTime: {self.ts}", expand=False))
+                                f"Target: [yellow]{self.base_url}[/]\nTime: {self.ts}", expand=False))
             console.print(f"Endpoints: {len(self.endpoints)} | Findings: {len(self.findings)} | Interesting: {interesting}\n")
             t = Table(title="Top Findings", header_style="bold magenta")
             t.add_column("#", width=3, justify="right")
@@ -733,14 +1209,16 @@ class ReportGenerator:
                 tf = f[0] if f else None
                 color = "red" if sc >= 28 else "yellow" if sc >= 18 else "cyan"
                 t.add_row(str(rank), f"[{color}]{ep.methods[0]}[/]", ep.path[:38],
-                         f"[{color}]{sc}[/]",
-                         (tf.delta_description[:46] if tf else ep.notes[:46]),
-                         f"{tf.baseline_status} {tf.baseline_classifier}"[:12] if tf else "-",
-                         f"{tf.variant_status} {tf.variant_classifier}"[:12] if tf else "-")
+                          f"[{color}]{sc}[/]",
+                          (tf.delta_description[:46] if tf else ep.notes[:46]),
+                          f"{tf.baseline_status} {tf.baseline_classifier}"[:12] if tf else "-",
+                          f"{tf.variant_status} {tf.variant_classifier}"[:12] if tf else "-")
             console.print(t)
             ct = Table(title="Clusters", header_style="bold blue")
-            ct.add_column("Cluster", width=8); ct.add_column("Status", width=6)
-            ct.add_column("Classifier", width=22); ct.add_column("Count", width=6, justify="right")
+            ct.add_column("Cluster", width=8)
+            ct.add_column("Status", width=6)
+            ct.add_column("Classifier", width=22)
+            ct.add_column("Count", width=6, justify="right")
             ct.add_column("Priority")
             for i, cl in enumerate(self.clusters[:12]):
                 prio = "[red]HIGH[/]" if cl.count <= 5 else "[yellow]MED[/]" if cl.count <= 20 else "[dim]LOW[/]"
@@ -758,7 +1236,7 @@ class ReportGenerator:
         out = self.output_dir / "report.json"
         self._rank()
         data = {"meta": {"tool": f"authz-diff-mapper v{TOOL_VERSION}", "target": self.base_url,
-                "timestamp": self.ts, "disclaimer": "Authorized testing only"},
+                         "timestamp": self.ts, "disclaimer": "Authorized testing only"},
                 "endpoints": [{"path": e.path, "methods": e.methods, "risk_score": e.risk_score,
                                "risk_keywords": e.risk_keywords, "has_object_id": e.has_object_id,
                                "source": e.source, "notes": e.notes} for e in self.endpoints],
@@ -780,7 +1258,7 @@ class ReportGenerator:
             "|---|--------|------|-------|----------|-------|"]
         for rank, (sc, cat, ep, f) in enumerate(self._ranked[:30], 1):
             tf = f[0] if f else None
-            d = (tf.delta_description[:60].replace("|","/") if tf else ep.notes[:60])
+            d = (tf.delta_description[:60].replace("|", "/") if tf else ep.notes[:60])
             lines.append(f"| {rank} | {ep.methods[0]} | `{ep.path}` | **{sc}** | {cat} | {d} |")
         lines.extend(["\n---\n## Response Clusters\n",
                       "| Cluster | Status | Classifier | Count | Priority |",
@@ -815,7 +1293,7 @@ def print_banner():
     print(f"""
 +---------------------------------------------------------------------+
 |          authz-diff-mapper  v{TOOL_VERSION}                                   |
-|      401/403 Auth/Authz Differential Analysis Tool                   |
+|      Smart Auth Differential Analysis Tool                            |
 +---------------------------------------------------------------------+
 |  FOR AUTHORIZED BUG BOUNTY & LAB TESTING ONLY                       |
 |  Do not use against systems without explicit permission.            |
@@ -852,7 +1330,7 @@ def swagger_only_report(endpoints: list[EndpointInfo], output_dir: Path, args: a
         out = output_dir / "swagger_analysis.json"
         data = {"tool": f"authz-diff-mapper v{TOOL_VERSION}", "mode": "swagger_only",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "endpoints": [{"rank": i+1, "path": ep.path, "methods": ep.methods,
+                "endpoints": [{"rank": i + 1, "path": ep.path, "methods": ep.methods,
                                "risk_score": ep.risk_score, "risk_keywords": ep.risk_keywords,
                                "has_object_id": ep.has_object_id,
                                "security_schemes": ep.security_schemes}
@@ -862,158 +1340,232 @@ def swagger_only_report(endpoints: list[EndpointInfo], output_dir: Path, args: a
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# AUTHZDIFFMAPPER — Main orchestrator class
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class AuthzDiffMapper:
+    def __init__(self, args: argparse.Namespace):
+        self.args = args
+        self.base_url = args.base_url
+        self.normalizer = TargetNormalizer(self.base_url)
+        self.client = HTTPClient(timeout=args.timeout, proxy=args.proxy,
+                                  verify_tls=not getattr(args, 'insecure', False))
+        self.rl = RateLimiter(args.rate)
+        self.collector = EndpointCollector(self.normalizer, self.client)
+        self.endpoints: list[EndpointInfo] = []
+        self.clusters: list[ClusterGroup] = []
+        self.all_findings: dict = {}
+        self.total_requests = 0
+
+    def run(self):
+        args = self.args
+        methods = list(dict.fromkeys([m.strip().upper() for m in args.methods.split(",")]))
+        if getattr(args, 'dangerous_methods', False):
+            warn_dangerous()
+            methods.extend(DANGEROUS_METHODS)
+            methods = list(dict.fromkeys(methods))
+
+        output_dir = Path(getattr(args, 'output', 'reports'))
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        extra_headers = parse_headers(getattr(args, 'header', []))
+
+        # Discovery phase
+        swagger_eps: list[EndpointInfo] = []
+        swagger_path = getattr(args, 'swagger', None)
+        if swagger_path:
+            try:
+                sa = SwaggerAnalyzer.load(swagger_path, self.client)
+                swagger_eps = sa.extract()
+                logging.info("Swagger: %d endpoints", len(swagger_eps))
+            except Exception as e:
+                logging.error("Swagger error: %s", e)
+
+        only_swagger = getattr(args, 'only_analyze_swagger', False)
+        if only_swagger and swagger_eps:
+            swagger_only_report(swagger_eps, output_dir, args)
+            self.endpoints = swagger_eps
+            return
+
+        # Auto-discover API docs if no endpoints provided
+        endpoints_file = getattr(args, 'endpoints', None)
+        path_map: dict[str, EndpointInfo] = {e.path: e for e in swagger_eps}
+
+        if endpoints_file:
+            try:
+                for p in self.collector.from_file(endpoints_file):
+                    if p not in path_map:
+                        path_map[p] = EndpointInfo(path=p, source="file")
+            except Exception as e:
+                logging.error("Endpoints file: %s", e)
+
+        if not swagger_eps and not endpoints_file:
+            logging.info("No swagger/endpoints provided — auto-discovering API docs...")
+            discoverer = ApiDocDiscoverer(self.client, self.normalizer, self.rl)
+            docs = discoverer.discover(max_paths=500)
+
+            for doc in docs:
+                if doc["type"] in ("openapi", "swagger") and doc["status"] == 200:
+                    logging.info("Parsing discovered doc: %s", doc["path"])
+                    sa = discoverer.parse_swagger(doc)
+                    if sa:
+                        for ep in sa.extract():
+                            if ep.path not in path_map:
+                                path_map[ep.path] = ep
+                    break
+
+            # If still no paths, try happy discovery on common API patterns
+            if not path_map:
+                logging.info("No API docs found — probing common API paths...")
+                for p in ["/api", "/api/v1", "/v1", "/health", "/status"]:
+                    resp = self.client.request("GET", self.normalizer.join(p))
+                    if resp["status_code"] in (200, 401, 403):
+                        if p not in path_map:
+                            path_map[p] = EndpointInfo(path=p, source="discovery")
+
+        if not path_map:
+            logging.warning("No endpoints collected. Target may be unreachable or non-API.")
+            self.endpoints = []
+            return
+
+        all_eps = list(path_map.values())
+        max_eps = getattr(args, 'max_endpoints', 500)
+        if len(all_eps) > max_eps:
+            logging.warning("Limiting to %d endpoints (--max-endpoints)", max_eps)
+            all_eps = all_eps[:max_eps]
+        logging.info("Testing %d endpoints", len(all_eps))
+
+        # Probing phase
+        ctx = {}
+        if getattr(args, 'context_file', None):
+            try:
+                raw = json.loads(Path(args.context_file).read_text(encoding="utf-8"))
+                ctx = {k: str(v) for k, v in raw.items() if not k.startswith("_") and isinstance(v, (str, int, float))}
+            except Exception as e:
+                logging.warning("Context file error: %s", e)
+
+        smart = getattr(args, 'smart', True)
+        prober = AuthProber(self.normalizer, self.client, self.rl,
+                            token=getattr(args, 'token', None),
+                            extra_hdrs=extra_headers, ctx=ctx,
+                            dry_run=getattr(args, 'dry_run', False),
+                            smart_detect=smart)
+        clusterer = ResponseClusterer()
+        all_findings: dict[str, list[DifferentialFinding]] = {}
+        self.total_requests = 0
+
+        for idx, ep in enumerate(all_eps, 1):
+            ep_methods = [m for m in ep.methods if m in methods] or [methods[0]]
+            for method in ep_methods:
+                key = f"{method}:{ep.path}"
+                logging.info("[%d/%d] %s %s", idx, len(all_eps), method, ep.path)
+                fps = prober.probe_smart(ep.path, method)
+                self.total_requests += len(fps)
+                for fp in fps:
+                    clusterer.add(fp)
+                findings = DifferentialAnalyzer.analyze(ep.path, method, fps)
+                if findings and findings[0].interesting:
+                    logging.info("  Interesting: %s", findings[0].delta_description[:80])
+                all_findings[key] = findings
+
+                # Path variations
+                if getattr(args, 'path_variations', False) and not getattr(args, 'dry_run', False):
+                    for vname, vpath in PathVariationModule.generate(ep.path)[:4]:
+                        self.rl.wait()
+                        vfps = prober.probe_smart(vpath, method)
+                        self.total_requests += len(vfps)
+                        vkey = f"{method}:{vpath}"
+                        for vfp in vfps:
+                            clusterer.add(vfp)
+                        vf = DifferentialAnalyzer.analyze(vpath, method, vfps)
+                        orig = fps[0] if fps else None
+                        var_base = vfps[0] if vfps else None
+                        if orig and var_base and orig.status_code != var_base.status_code:
+                            vf.append(DifferentialFinding(endpoint_path=vpath, method=method,
+                                baseline_probe="orig_path", variant_probe=vname,
+                                baseline_status=orig.status_code, variant_status=var_base.status_code,
+                                baseline_classifier=orig.auth_classifier,
+                                variant_classifier=var_base.auth_classifier,
+                                baseline_length=orig.content_length, variant_length=var_base.content_length,
+                                delta_description=f"Path '{vname}' changed status {orig.status_code}->{var_base.status_code}",
+                                risk_score=4, notes="Path normalization differs", interesting=True))
+                        all_findings[vkey] = vf
+
+        self.client.close()
+        if getattr(args, 'dry_run', False):
+            logging.info("DRY-RUN complete. No requests sent.")
+            return
+
+        self.endpoints = all_eps
+        self.clusters = clusterer.clusters()
+        self.all_findings = all_findings
+
+        # Report
+        reporter = ReportGenerator(self.base_url, all_eps, all_findings,
+                                    self.clusters, output_dir)
+        reporter.terminal()
+        if getattr(args, 'json', None):
+            print(f"\n[+] JSON: {reporter.export_json()}")
+        if getattr(args, 'markdown', None):
+            print(f"[+] Markdown: {reporter.export_markdown()}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def main():
     parser = argparse.ArgumentParser(prog="authz-diff-mapper",
-        description="401/403 Auth/Authz Behavior Analyzer -- Authorized testing only",
+        description="401/403 Auth/Authz Behavior Analyzer — Smart Auto-Discovery Edition",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Examples:\n"
+               "  %(prog)s --base-url https://api.example.com\n"
                "  %(prog)s --base-url https://api.example.com --swagger openapi.json\n"
                "  %(prog)s --base-url https://api.example.com --endpoints paths.txt --token TOKEN --markdown\n"
                "  %(prog)s --base-url https://api.example.com --swagger spec.json --only-analyze-swagger")
-    parser.add_argument("--base-url", required=True)
-    parser.add_argument("--endpoints")
-    parser.add_argument("--swagger")
-    parser.add_argument("--token")
-    parser.add_argument("--header", action="append", dest="headers", default=[], metavar="H")
-    parser.add_argument("--context-file")
-    parser.add_argument("--methods", default="GET,HEAD,OPTIONS")
-    parser.add_argument("--dangerous-methods", action="store_true")
-    parser.add_argument("--rate", type=float, default=DEFAULT_RATE)
-    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
-    parser.add_argument("--proxy")
-    parser.add_argument("--insecure", action="store_true")
-    parser.add_argument("--max-endpoints", type=int, default=DEFAULT_MAX_ENDPOINTS)
-    parser.add_argument("--only-analyze-swagger", action="store_true")
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--safe-discovery", action="store_true")
-    parser.add_argument("--path-variations", action="store_true")
-    parser.add_argument("--output", default="reports")
-    parser.add_argument("--json", action="store_true")
-    parser.add_argument("--markdown", action="store_true")
-    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--base-url", required=True,
+                        help="Target base URL (e.g. https://api.example.com/api)")
+    parser.add_argument("--endpoints", help="File with one path per line")
+    parser.add_argument("--swagger", help="Local or remote Swagger/OpenAPI spec file")
+    parser.add_argument("--token", help="Valid Bearer token for differential comparison")
+    parser.add_argument("--header", action="append", dest="headers", default=[], metavar="H",
+                        help="Extra headers (e.g. 'X-Org-ID: org_42')")
+    parser.add_argument("--context-file", help="JSON file with context values (tenant IDs etc.)")
+    parser.add_argument("--methods", default="GET,HEAD,OPTIONS",
+                        help="HTTP methods to test (default: GET,HEAD,OPTIONS)")
+    parser.add_argument("--dangerous-methods", action="store_true",
+                        help="Enable POST/PUT/PATCH/DELETE (may modify data)")
+    parser.add_argument("--rate", type=float, default=DEFAULT_RATE,
+                        help="Requests per second (default: %.1f)" % DEFAULT_RATE)
+    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT,
+                        help="Request timeout in seconds (default: %.1f)" % DEFAULT_TIMEOUT)
+    parser.add_argument("--proxy", help="HTTP proxy (e.g. http://127.0.0.1:8080)")
+    parser.add_argument("--insecure", action="store_true", help="Disable TLS verification")
+    parser.add_argument("--max-endpoints", type=int, default=DEFAULT_MAX_ENDPOINTS,
+                        help="Max endpoints to test (default: %d)" % DEFAULT_MAX_ENDPOINTS)
+    parser.add_argument("--only-analyze-swagger", action="store_true",
+                        help="Only analyze swagger, don't probe")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Log what would be done, don't send requests")
+    parser.add_argument("--path-variations", action="store_true",
+                        help="Test path normalization variants")
+    parser.add_argument("--output", default="reports", help="Output directory")
+    parser.add_argument("--json", action="store_true", help="Export JSON report")
+    parser.add_argument("--markdown", action="store_true", help="Export Markdown report")
+    parser.add_argument("--no-smart", action="store_true",
+                        help="Disable smart auth detection (use standard probes only)")
+    parser.add_argument("--verbose", action="store_true", help="Verbose logging")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s [%(levelname)s] %(message)s")
 
     print_banner()
+    print("[i] Smart mode: %s" % ("ON" if not args.no_smart else "OFF"))
+    print("[i] Auto-discovering API docs: %s" % ("YES" if not args.swagger and not args.endpoints else "from input"))
 
-    methods = list(dict.fromkeys([m.strip().upper() for m in args.methods.split(",")]))
-    if args.dangerous_methods:
-        warn_dangerous()
-        methods.extend(DANGEROUS_METHODS)
-        methods = list(dict.fromkeys(methods))
-
-    output_dir = Path(args.output)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    extra_headers = parse_headers(args.headers)
-    ctx = {}
-    if args.context_file:
-        try:
-            raw = json.loads(Path(args.context_file).read_text(encoding="utf-8"))
-            ctx = {k: str(v) for k, v in raw.items() if not k.startswith("_") and isinstance(v, (str, int, float))}
-            logging.info("Context: %s", list(ctx.keys()))
-        except Exception as e:
-            logging.warning("Context file error: %s", e)
-
-    try:
-        normalizer = TargetNormalizer(args.base_url)
-    except ValueError as e:
-        logging.fatal("Invalid base URL: %s", e)
-        sys.exit(1)
-
-    client = HTTPClient(timeout=args.timeout, proxy=args.proxy, verify_tls=not args.insecure)
-    rl = RateLimiter(args.rate)
-    collector = EndpointCollector(normalizer, client)
-
-    # ── Swagger ────────────────────────────────────────────────────────────────
-    swagger_eps: list[EndpointInfo] = []
-    if args.swagger:
-        try:
-            sa = SwaggerAnalyzer.load(args.swagger, client)
-            swagger_eps = sa.extract()
-            logging.info("Swagger: %d endpoints", len(swagger_eps))
-        except Exception as e:
-            logging.error("Swagger error: %s", e)
-
-    if args.only_analyze_swagger:
-        if not swagger_eps: logging.fatal("--only-analyze-swagger needs --swagger"); sys.exit(1)
-        swagger_only_report(swagger_eps, output_dir, args)
-        client.close(); return
-
-    # ── Build endpoint set ─────────────────────────────────────────────────────
-    path_map: dict[str, EndpointInfo] = {e.path: e for e in swagger_eps}
-    if args.endpoints:
-        try:
-            for p in collector.from_file(args.endpoints):
-                if p not in path_map: path_map[p] = EndpointInfo(path=p, source="file")
-        except Exception as e: logging.error("Endpoints file: %s", e)
-
-    if args.safe_discovery:
-        for p in collector.discover(rl):
-            if p not in path_map: path_map[p] = EndpointInfo(path=p, source="discovery")
-
-    if not path_map:
-        logging.warning("No endpoints collected. Use --endpoints, --swagger, or --safe-discovery.")
-        if not args.dry_run: client.close(); return
-
-    all_eps = list(path_map.values())
-    if len(all_eps) > args.max_endpoints:
-        logging.warning("Limiting to %d endpoints (--max-endpoints)", args.max_endpoints)
-        all_eps = all_eps[:args.max_endpoints]
-    logging.info("Testing %d endpoints", len(all_eps))
-
-    # ── Probe ──────────────────────────────────────────────────────────────────
-    prober = AuthProber(normalizer, client, rl, token=args.token,
-                        extra_hdrs=extra_headers, ctx=ctx, dry_run=args.dry_run)
-    clusterer = ResponseClusterer()
-    all_findings: dict[str, list[DifferentialFinding]] = {}
-
-    for idx, ep in enumerate(all_eps, 1):
-        ep_methods = [m for m in ep.methods if m in methods] or [methods[0]]
-        for method in ep_methods:
-            key = f"{method}:{ep.path}"
-            logging.info("[%d/%d] %s %s", idx, len(all_eps), method, ep.path)
-            fps = prober.probe(ep.path, method)
-            for fp in fps: clusterer.add(fp)
-            findings = DifferentialAnalyzer.analyze(ep.path, method, fps)
-            if findings and findings[0].interesting:
-                logging.info("  Interesting: %s", findings[0].delta_description[:80])
-            all_findings[key] = findings
-
-            if args.path_variations and not args.dry_run:
-                for vname, vpath in PathVariationModule.generate(ep.path)[:4]:
-                    rl.wait()
-                    vfps = prober.probe(vpath, method)
-                    vkey = f"{method}:{vpath}"
-                    for vfp in vfps: clusterer.add(vfp)
-                    vf = DifferentialAnalyzer.analyze(vpath, method, vfps)
-                    orig = fps[0] if fps else None
-                    var_base = vfps[0] if vfps else None
-                    if orig and var_base and orig.status_code != var_base.status_code:
-                        vf.append(DifferentialFinding(endpoint_path=vpath, method=method,
-                            baseline_probe="orig_path", variant_probe=vname,
-                            baseline_status=orig.status_code, variant_status=var_base.status_code,
-                            baseline_classifier=orig.auth_classifier,
-                            variant_classifier=var_base.auth_classifier,
-                            baseline_length=orig.content_length, variant_length=var_base.content_length,
-                            delta_description=f"Path '{vname}' changed status {orig.status_code}->{var_base.status_code}",
-                            risk_score=4, notes="Path normalization differs", interesting=True))
-                    all_findings[vkey] = vf
-
-    client.close()
-    if args.dry_run: logging.info("DRY-RUN complete. No requests sent."); return
-
-    # ── Report ─────────────────────────────────────────────────────────────────
-    clusters = clusterer.clusters()
-    reporter = ReportGenerator(args.base_url, all_eps, all_findings, clusters, output_dir)
-    reporter.terminal()
-    if args.json: print(f"\n[+] JSON: {reporter.export_json()}")
-    if args.markdown: print(f"[+] Markdown: {reporter.export_markdown()}")
+    mapper = AuthzDiffMapper(args)
+    mapper.run()
 
 
 if __name__ == "__main__":
