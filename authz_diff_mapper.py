@@ -80,6 +80,10 @@ DOC_PATHS_FLAT = [
     "/api-docs", "/api-docs.json",
     "/apidocs", "/apidocs.json",
     "/docs", "/doc",
+    "/docs/api-docs", "/docs/api-docs.json", "/docs/apidocs", "/docs/apidocs.json",
+    "/docs/swagger.json", "/docs/openapi.json",
+    "/api/docs/api-docs", "/api/docs/api-docs.json",
+    "/api/docs/swagger.json", "/api/docs/openapi.json",
     "/swagger-resources",
     "/swagger-resources.json",
     "/swagger-ui.html",
@@ -523,6 +527,24 @@ class ApiDocDiscoverer:
         paths = COMPREHENSIVE_DISCOVERY_PATHS[:max_paths]
         logging.info("Discovering API docs: probing %d paths", len(paths))
         found: list[dict[str, Any]] = []
+
+        # Probe the base URL itself first (might be the API doc endpoint)
+        self.rl.wait()
+        root_resp = self.client.request("GET", self.normalizer.join(""))
+        root_body = (root_resp.get("body", "") or "").encode("utf-8", errors="replace")
+        root_ct = (root_resp.get("headers", {}) or {}).get("content-type", "").lower()
+        if root_resp["status_code"] == 200:
+            root_type = self._detect_doc_type(root_body, root_ct, "")
+            if root_type:
+                found.append({
+                    "path": "", "status": 200, "content_type": root_ct,
+                    "type": root_type, "body": root_resp.get("body", "") or "",
+                    "headers": root_resp.get("headers", {}) or {},
+                })
+                logging.info("  [%s] (base URL itself)", root_type)
+                if root_type in ("openapi", "swagger"):
+                    self.discovered_docs.append(found[-1])
+                    return found  # Found it at root, no need to probe more
 
         for p in paths:
             self.rl.wait()
