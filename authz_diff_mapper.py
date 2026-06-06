@@ -1458,6 +1458,31 @@ class AuthzDiffMapper:
 
         extra_headers = parse_headers(getattr(args, 'header', []))
 
+        # Quick connectivity check before heavy discovery
+        logging.info("Checking target connectivity...")
+        probe_paths = ["/", "/api", "/health", "/swagger.json"]
+        reachable = 0
+        blocked = 0
+        for pp in probe_paths:
+            self.rl.wait()
+            pr = self.client.request("GET", self.normalizer.join(pp), headers={"User-Agent": "curl/8.0"})
+            sc = pr.get("status_code", 0)
+            if sc == 0:
+                pass  # connection error
+            elif sc == 403:
+                blocked += 1
+            else:
+                reachable += 1
+        if reachable == 0 and blocked >= 3:
+            logging.error("Target unreachable or blocking all requests (%d/4 403). Exiting.", blocked)
+            print("\n[!] Target is not responding or is blocking this IP.")
+            print("[!] Try: --proxy http://... or verify the target is accessible from this machine.\n")
+            self.client.close()
+            return
+        if blocked >= 3:
+            logging.warning("Target appears to be blocking requests (%d/4 probes returned 403).", blocked)
+            logging.warning("The server may have WAF/IP restrictions. Probes may all fail.")
+
         # Discovery phase
         swagger_eps: list[EndpointInfo] = []
         swagger_path = getattr(args, 'swagger', None)
