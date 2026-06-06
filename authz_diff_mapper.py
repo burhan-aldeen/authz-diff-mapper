@@ -65,6 +65,7 @@ BASE_PATHS = [
     "/internal", "/service", "/services",
     "/developer", "/developers",
     "/graphql", "/graphiql", "/graphql-playground",
+    "/openapi/v2", "/openapi/v3",
 ]
 
 DOC_FILES = [
@@ -81,6 +82,8 @@ DOC_PATHS_FLAT = [
     "/api-docs", "/api-docs.json",
     "/apidocs", "/apidocs.json",
     "/docs", "/doc",
+    "/healthz", "/livez", "/readyz", "/version",
+    "/openapi/v2", "/openapi/v3", "/openapi/v3/api-docs",
     "/docs/api-docs", "/docs/api-docs.json", "/docs/apidocs", "/docs/apidocs.json",
     "/docs/swagger.json", "/docs/openapi.json",
     "/api/docs/api-docs", "/api/docs/api-docs.json",
@@ -1530,7 +1533,13 @@ class AuthzDiffMapper:
             # If still no paths, try happy discovery on common API patterns
             if not path_map:
                 logging.info("No API docs found — probing common API paths...")
-                for p in ["/api", "/api/v1", "/v1", "/health", "/status"]:
+                common_paths = [
+                    "/api", "/api/v1", "/v1", "/health", "/status",
+                    "/healthz", "/livez", "/readyz", "/version",
+                    "/apis", "/api/v2", "/api/v3", "/v2",
+                ]
+                for p in common_paths:
+                    self.rl.wait()
                     resp = self.client.request("GET", self.normalizer.join(p))
                     if resp["status_code"] in (200, 401, 403):
                         if p not in path_map:
