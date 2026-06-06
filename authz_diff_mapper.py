@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 import urllib.parse
 from collections import defaultdict
@@ -49,7 +50,7 @@ except ImportError:
 TOOL_VERSION = "1.1.0"
 TOOL_UA = f"authz-diff-mapper/{TOOL_VERSION} (authorized-testing-only)"
 
-DEFAULT_RATE = 2.0
+DEFAULT_RATE = 50.0
 DEFAULT_TIMEOUT = 15.0
 DEFAULT_MAX_ENDPOINTS = 500
 DEFAULT_METHODS = ["GET", "HEAD", "OPTIONS"]
@@ -631,18 +632,42 @@ class ApiDocDiscoverer:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class RateLimiter:
-    def __init__(self, rate: float):
-        self.rate = max(0.1, rate)
-        self._min_interval = 1.0 / self.rate
-        self._last_call = 0.0
+    def __init__(self, rate: float, adaptive: bool = True):
+        self._base_rate = max(0.5, rate)
+        self._min_interval = 1.0 / self._base_rate
+        self._current_interval = self._min_interval
+        self._last_call: float = 0.0
+        self._lock = threading.Lock()
+        self._adaptive = adaptive
+        self._errors: list[float] = []
+        self._window = 10.0  # seconds
 
-    def wait(self) -> None:
-        now = time.monotonic()
-        elapsed = now - self._last_call
-        sleep_time = self._min_interval - elapsed
-        if sleep_time > 0:
-            time.sleep(sleep_time)
-        self._last_call = time.monotonic()
+    def wait(self, ok: bool = True) -> None:
+        with self._lock:
+            now = time.monotonic()
+            elapsed = now - self._last_call
+            sleep_time = self._current_interval - elapsed
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+            self._last_call = time.monotonic()
+
+            if not self._adaptive:
+                return
+
+            # Adaptive: track errors in sliding window
+            cutoff = now - self._window
+            self._errors = [t for t in self._errors if t > cutoff]
+            if not ok:
+                self._errors.append(now)
+
+            err_ratio = len(self._errors) / max(1, self._window / self._current_interval)
+            if err_ratio > 0.3:
+                self._current_interval = min(self._current_interval * 1.5, 10.0)
+            elif err_ratio < 0.05 and self._current_interval > self._min_interval:
+                self._current_interval = max(self._current_interval * 0.9, self._min_interval)
+
+    def report(self, status_code: int) -> None:
+        self.wait(ok=status_code not in (0, 429, 503, 502, 504))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -651,11 +676,13 @@ class RateLimiter:
 
 class HTTPClient:
     def __init__(self, timeout: float = 15.0, proxy: Optional[str] = None,
-                 verify_tls: bool = True, max_retries: int = 2):
+                 verify_tls: bool = True, max_retries: int = 2,
+                 rate_limiter: Optional[RateLimiter] = None):
         self.timeout = timeout
         self.proxy = proxy
         self.verify_tls = verify_tls
         self.max_retries = max_retries
+        self.rl = rate_limiter
         self._client = self._build()
 
     def _build(self):
@@ -699,12 +726,16 @@ class HTTPClient:
                     body_text = body.decode("utf-8", errors="replace")
                 except Exception:
                     body_text = ""
+                if self.rl:
+                    self.rl.report(resp.status_code)
                 return {"status_code": resp.status_code, "headers": dict(resp.headers),
                         "body": body_text,
                         "content_length": int(resp.headers.get("content-length", len(body))),
                         "elapsed_ms": elapsed, "error": ""}
             except Exception as exc:
                 last_err = str(exc)
+                if self.rl:
+                    self.rl.report(0)
                 if attempt < self.max_retries:
                     time.sleep(1.5 * (attempt + 1))
         return {"status_code": 0, "headers": {}, "body": "",
@@ -1404,9 +1435,10 @@ class AuthzDiffMapper:
         self.args = args
         self.base_url = args.base_url
         self.normalizer = TargetNormalizer(self.base_url)
-        self.client = HTTPClient(timeout=args.timeout, proxy=args.proxy,
-                                  verify_tls=not getattr(args, 'insecure', False))
         self.rl = RateLimiter(args.rate)
+        self.client = HTTPClient(timeout=args.timeout, proxy=args.proxy,
+                                  verify_tls=not getattr(args, 'insecure', False),
+                                  rate_limiter=self.rl)
         self.collector = EndpointCollector(self.normalizer, self.client)
         self.endpoints: list[EndpointInfo] = []
         self.clusters: list[ClusterGroup] = []
@@ -1510,44 +1542,52 @@ class AuthzDiffMapper:
         all_findings: dict[str, list[DifferentialFinding]] = {}
         self.total_requests = 0
 
-        for idx, ep in enumerate(all_eps, 1):
+        concurrency = getattr(args, 'concurrency', 1)
+        tasks = []
+        for ep in all_eps:
             ep_methods = [m for m in ep.methods if m in methods] or [methods[0]]
             for method in ep_methods:
-                key = f"{method}:{ep.path}"
-                logging.info("[%d/%d] %s %s", idx, len(all_eps), method, ep.path)
-                fps = prober.probe_smart(ep.path, method)
-                self.total_requests += len(fps)
-                for fp in fps:
-                    clusterer.add(fp)
-                findings = DifferentialAnalyzer.analyze(ep.path, method, fps)
-                if findings and findings[0].interesting:
-                    logging.info("  Interesting: %s", findings[0].delta_description[:80])
-                all_findings[key] = findings
+                tasks.append((ep, method))
 
-                # Path variations
-                if getattr(args, 'path_variations', False) and not getattr(args, 'dry_run', False):
-                    for vname, vpath in PathVariationModule.generate(ep.path)[:4]:
-                        self.rl.wait()
-                        vfps = prober.probe_smart(vpath, method)
-                        self.total_requests += len(vfps)
-                        vkey = f"{method}:{vpath}"
-                        for vfp in vfps:
-                            clusterer.add(vfp)
-                        vf = DifferentialAnalyzer.analyze(vpath, method, vfps)
-                        orig = fps[0] if fps else None
-                        var_base = vfps[0] if vfps else None
-                        if orig and var_base and orig.status_code != var_base.status_code:
-                            vf.append(DifferentialFinding(endpoint_path=vpath, method=method,
-                                baseline_probe="orig_path", variant_probe=vname,
-                                baseline_status=orig.status_code, variant_status=var_base.status_code,
-                                baseline_classifier=orig.auth_classifier,
-                                variant_classifier=var_base.auth_classifier,
-                                baseline_length=orig.content_length, variant_length=var_base.content_length,
-                                delta_description=f"Path '{vname}' changed status {orig.status_code}->{var_base.status_code}",
-                                risk_score=4, notes="Path normalization differs", interesting=True))
-                        all_findings[vkey] = vf
+        def _probe_one(ep: EndpointInfo, method: str) -> tuple[str, list[DifferentialFinding], list[ResponseFingerprint]]:
+            local_client = self.client
+            if concurrency > 1:
+                local_client = HTTPClient(timeout=args.timeout, proxy=args.proxy,
+                                          verify_tls=not getattr(args, 'insecure', False),
+                                          rate_limiter=self.rl)
+            local_prober = AuthProber(self.normalizer, local_client, self.rl,
+                                       token=getattr(args, 'token', None),
+                                       extra_hdrs=extra_headers, ctx=ctx,
+                                       dry_run=getattr(args, 'dry_run', False),
+                                       smart_detect=smart)
+            key = f"{method}:{ep.path}"
+            fps = local_prober.probe_smart(ep.path, method)
+            findings = DifferentialAnalyzer.analyze(ep.path, method, fps)
+            if concurrency > 1:
+                local_client.close()
+            return key, findings, fps
 
-        self.client.close()
+        results: list[tuple[str, list[DifferentialFinding], list[ResponseFingerprint]]] = []
+        if concurrency > 1:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(max_workers=concurrency) as pool:
+                futures = [pool.submit(_probe_one, ep, method) for ep, method in tasks]
+                for f in as_completed(futures):
+                    key, findings, fps = f.result()
+                    results.append((key, findings, fps))
+        else:
+            for ep, method in tasks:
+                key, findings, fps = _probe_one(ep, method)
+                results.append((key, findings, fps))
+            self.client.close()
+
+        for key, findings, fps in results:
+            self.total_requests += len(fps)
+            for fp in fps:
+                clusterer.add(fp)
+            if findings and findings[0].interesting:
+                logging.info("  Interesting: %s", findings[0].delta_description[:80])
+            all_findings[key] = findings
         if getattr(args, 'dry_run', False):
             logging.info("DRY-RUN complete. No requests sent.")
             return
@@ -1608,6 +1648,8 @@ def main():
     parser.add_argument("--output", default="reports", help="Output directory")
     parser.add_argument("--json", action="store_true", help="Export JSON report")
     parser.add_argument("--markdown", action="store_true", help="Export Markdown report")
+    parser.add_argument("--concurrency", type=int, default=1,
+                        help="Parallel endpoint probes (default: 1, no concurrency)")
     parser.add_argument("--no-smart", action="store_true",
                         help="Disable smart auth detection (use standard probes only)")
     parser.add_argument("--verbose", action="store_true", help="Verbose logging")
